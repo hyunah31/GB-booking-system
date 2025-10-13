@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>특별실 예약 시스템</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
+    import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js';
+    import { getFirestore, collection, addDoc, deleteDoc, doc, query, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
+
+    // Firebase 설정
+    const firebaseConfig = {
+      apiKey: "AIzaSyAD7PCA-4rhRZ0eJJnj1uje_2dUk8PALUA",
+      authDomain: "gb-middle-school.firebaseapp.com",
+      projectId: "gb-middle-school",
+      storageBucket: "gb-middle-school.firebasestorage.app",
+      messagingSenderId: "204002825981",
+      appId: "1:204002825981:web:b77456fd2eac60c7fcd094"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const provider = new GoogleAuthProvider();
+
+    let state = {
+      user: null,
+      page: 'login',
+      room: '',
+      date: '',
+      calendarDate: new Date(),
+      showCalendar: false,
+      showModal: false,
+      selectedSlot: null,
+      reservations: []
+    };
+
+    const rooms = [
+      { id: 'creative', name: '창의융합실' },
+      { id: 'audiovisual', name: '시청각실' }
+    ];
+
+    function getTimeSlots(dateString) {
+      const date = new Date(dateString + 'T00:00:00');
+      const day = date.getDay();
+      
+      if (day === 1 || day === 3) {
+        return [
+          { id: 1, name: '1교시', time: '09:00-09:45' },
+          { id: 2, name: '2교시', time: '09:55-10:40' },
+          { id: 3, name: '3교시', time: '10:50-11:35' },
+          { id: 4, name: '4교시', time: '11:45-12:30' },
+          { id: 'lunch', name: '점심시간', time: '12:30-13:30' },
+          { id: 5, name: '5교시', time: '13:30-14:15' },
+          { id: 6, name: '6교시', time: '14:25-15:10' },
+          { id: 'after', name: '방과후', time: '15:20-16:05' }
+        ];
+      }
+      
+      return [
+        { id: 1, name: '1교시', time: '09:00-09:45' },
+        { id: 2, name: '2교시', time: '09:55-10:40' },
+        { id: 3, name: '3교시', time: '10:50-11:35' },
+        { id: 4, name: '4교시', time: '11:45-12:30' },
+        { id: 'lunch', name: '점심시간', time: '12:30-13:30' },
+        { id: 5, name: '5교시', time: '13:30-14:15' },
+        { id: 6, name: '6교시', time: '14:25-15:10' },
+        { id: 7, name: '7교시', time: '15:20-16:05' },
+        { id: 'after', name: '방과후', time: '16:15-17:00' }
+      ];
+    }
+
+    function isWeekday(date) {
+      const day = date.getDay();
+      return day !== 0 && day !== 6;
+    }
+
+    function formatDate(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function isFixedSlot(roomId, dateString, slotId) {
+      if (roomId === 'audiovisual') return { fixed: false };
+      
+      if (roomId === 'creative') {
+        const date = new Date(dateString + 'T00:00:00');
+        const day = date.getDay();
+        
+        if (day === 3) {
+          if (slotId === 1 || slotId === 2) return { fixed: true, label: '정보 수업' };
+          if (slotId === 5 || slotId === 6) return { fixed: true, label: '자유학기 수업' };
+        }
+        if (day === 4 && [4,5,6,7].includes(slotId)) return { fixed: true, label: '정보 수업' };
+        if (day === 5 && [1,2,3,4].includes(slotId)) return { fixed: true, label: '정보 수업' };
+      }
+      
+      return { fixed: false };
+    }
+
+    async function login() {
+      try {
+        await signInWithPopup(auth, provider);
+      } catch (error) {
+        alert('로그인 실패: ' + error.message);
+      }
+    }
+
+    async function logout() {
+      try {
+        await signOut(auth);
+      } catch (error) {
+        alert('로그아웃 실패');
+      }
+    }
+
+    async function makeReservation(subject) {
+      if (!subject) {
+        alert('교과명을 입력해주세요.');
+        return;
+      }
+
+      try {
+        await addDoc(collection(db, 'reservations'), {
+          room: state.room,
+          date: state.date,
+          slotId: state.selectedSlot.id,
+          slotName: state.selectedSlot.name,
+          slotTime: state.selectedSlot.time,
+          subject: subject,
+          teacher: state.user.displayName,
+          email: state.user.email,
+          created: new Date().toISOString()
+        });
+        
+        state.showModal = false;
+        state.selectedSlot = null;
+        render();
+      } catch (error) {
+        alert('예약 실패: ' + error.message);
+      }
+    }
+
+    async function removeReservation(id) {
+      if (!confirm('예약을 취소하시겠습니까?')) return;
+      
+      try {
+        await deleteDoc(doc(db, 'reservations', id));
+      } catch (error) {
+        alert('취소 실패');
+      }
+    }
+
+    function getReservation(roomId, date, slotId) {
+      return state.reservations.find(r => 
+        r.room === roomId && r.date === date && r.slotId === slotId
+      );
+    }
+
+    function getDateReservations(date) {
+      return state.reservations.filter(r => r.date === date);
+    }
+
+    function getDaysInMonth(date) {
+      const year = date.getFullYear();
+      const month = date.getMonth();
+      const firstDay = new Date(year, month, 1);
+      const lastDay = new Date(year, month + 1, 0);
+      return {
+        daysInMonth: lastDay.getDate(),
+        startingDayOfWeek: firstDay.getDay(),
+        year,
+        month
+      };
+    }
+
+    function render() {
+      const el = document.getElementById('app');
+      
+      if (state.page === 'login') {
+        el.innerHTML = `
+          <div class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-6">
+            <div class="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full text-center">
+              <h1 class="text-3xl font-bold text-gray-800 mb-4">특별실 예약 시스템</h1>
+              <p class="text-gray-600 mb-8">Google 계정으로 로그인하세요</p>
+              <button onclick="window.appLogin()" class="w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 flex items-center justify-center gap-2">
+                <svg class="w-5 h-5" viewBox="0 0 24 24">
+                  <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                  <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                </svg>
+                Google로 로그인
+              </button>
+            </div>
+          </div>
+        `;
+      } else if (state.page === 'home') {
+        el.innerHTML = `
+          <div class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+            <div class="max-w-4xl mx-auto">
+              <div class="bg-white rounded-2xl shadow-xl p-8">
+                <div class="flex justify-between items-center mb-6">
+                  <div>
+                    <h1 class="text-3xl font-bold text-gray-800">특별실 예약 시스템</h1>
+                    <p class="text-gray-600 mt-1">${state.user.displayName}님 환영합니다!</p>
+                  </div>
+                  <button onclick="window.appLogout()" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300">
+                    로그아웃
+                  </button>
+                </div>
+                <p class="text-gray-600 mb-8">예약할 특별실을 선택해주세요</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                  <div onclick="window.selectRoom('creative')" class="p-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl shadow-lg cursor-pointer hover:shadow-2xl hover:scale-105 transition-all">
+                    <h2 class="text-2xl font-bold text-white mb-2">창의융합실</h2>
+                    <p class="text-indigo-100">클릭하여 예약하기</p>
+                  </div>
+                  <div onclick="window.selectRoom('audiovisual')" class="p-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl shadow-lg cursor-pointer hover:shadow-2xl hover:scale-105 transition-all">
+                    <h2 class="text-2xl font-bold text-white mb-2">시청각실</h2>
+                    <p class="text-indigo-100">클릭하여 예약하기</p>
+                  </div>
+                </div>
+                <button onclick="window.goStatus()" class="w-full p-6 bg-gray-100 rounded-xl hover:bg-gray-200">
+                  <span class="text-lg font-semibold text-gray-700">전체 예약 현황 보기</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+      } else if (state.page === 'booking') {
+        const roomName = rooms.find(r => r.id === state.room)?.name;
+        const slots = state.date ? getTimeSlots(state.date) : [];
+        
+        el.innerHTML = `
+          <div class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+            <div class="max-w-4xl mx-auto">
+              <div class="bg-white rounded-2xl shadow-xl p-8">
+                <button onclick="window.goHome()" class="mb-4 text-indigo-600 hover:text-indigo-800">← 홈으로</button>
+                <h1 class="text-3xl font-bold text-gray-800 mb-6">${roomName} 예약</h1>
+                
+                <button onclick="window.toggleCal()" class="w-full px-4 py-3 mb-4 border-2 border-gray-200 rounded-lg text-left hover:border-indigo-500">
+                  ${state.date ? new Date(state.date + 'T00:00:00').toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' }) : '날짜 선택'}
+                </button>
+                
+                ${state.showCalendar ? renderCal() : ''}
+                
+                ${state.date ? `
+                  <div class="space-y-3 mt-6">
+                    ${slots.map(slot => {
+                      const res = getReservation(state.room, state.date, slot.id);
+                      const fix = isFixedSlot(state.room, state.date, slot.id);
+                      
+                      return `
+                        <div onclick="${!res && !fix.fixed ? `window.openModal(${JSON.stringify(slot).replace(/"/g, '&quot;')})` : ''}" 
+                             class="p-4 rounded-lg border-2 ${
+                          fix.fixed ? 'bg-orange-50 border-orange-300' :
+                          res ? 'bg-gray-100 border-gray-300' :
+                          'bg-white border-indigo-200 hover:border-indigo-400 cursor-pointer'
+                        }">
+                          <div class="flex justify-between">
+                            <div>
+                              <div class="font-bold">${slot.name} <span class="text-sm text-gray-500">${slot.time}</span></div>
+                              ${fix.fixed ? `<div class="text-sm text-orange-700">${fix.label}</div>` : 
+                                res ? `<div class="text-sm">${res.subject} - ${res.teacher}</div>` : 
+                                '<div class="text-sm text-gray-500">예약 가능</div>'}
+                            </div>
+                            <div>
+                              ${fix.fixed ? '<span class="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-sm">예약불가</span>' :
+                                res ? `
+                                  <div class="flex gap-2">
+                                    <span class="bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm">예약됨</span>
+                                    ${res.email === state.user.email ? `<button onclick="event.stopPropagation(); window.cancelRes('${res.id}')" class="bg-red-500 text-white px-3 py-1 rounded text-sm">취소</button>` : ''}
+                                  </div>
+                                ` :
+                                '<span class="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm">예약하기</span>'}
+                            </div>
+                          </div>
+                        </div>
+                      `;
+                    }).join('')}
+                  </div>
+                ` : ''}
+              </div>
+            </div>
+          </div>
+          ${state.showModal ? renderModal() : ''}
+        `;
+      } else if (state.page === 'status') {
+        el.innerHTML = `
+          <div class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+            <div class="max-w-6xl mx-auto">
+              <div class="bg-white rounded-2xl shadow-xl p-8">
+                <button onclick="window.goHome()" class="mb-4 text-indigo-600">← 홈으로</button>
+                <h1 class="text-3xl font-bold text-gray-800 mb-6">예약 현황</h1>
+                ${renderStatusCal()}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    function renderCal() {
+      const { year, month, daysInMonth, startingDayOfWeek } = getDaysInMonth(state.calendarDate);
+      
+      let html = '<div class="bg-white p-4 border rounded-lg mt-2"><div class="flex justify-between mb-4"><button onclick="window.prevMonth()" class="p-2">‹</button><div class="font-bold">' + year + '년 ' + (month+1) + '월</div><button onclick="window.nextMonth()" class="p-2">›</button></div><div class="grid grid-cols-7 gap-2">';
+      
+      ['일','월','화','수','목','금','토'].forEach(d => {
+        html += '<div class="text-center text-sm font-bold">' + d + '</div>';
+      });
+      
+      for (let i = 0; i < startingDayOfWeek; i++) html += '<div></div>';
+      
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dt = new Date(year, month, d);
+        const ds = formatDate(dt);
+        const isWd = isWeekday(dt);
+        const sel = ds === state.date;
+        
+        html += '<button onclick="' + (isWd ? 'window.selectDate(' + d + ')' : '') + '" class="h-10 rounded ' + 
+          (!isWd ? 'text-gray-300' : sel ? 'bg-indigo-600 text-white' : 'hover:bg-gray-100') + '">' + d + '</button>';
+      }
+      
+      html += '</div></div>';
+      return html;
+    }
+
+    function renderStatusCal() {
+      const { year, month, daysInMonth, startingDayOfWeek } = getDaysInMonth(state.calendarDate);
+      
+      let html = '<div class="flex justify-between mb-4"><button onclick="window.prevMonth()" class="p-2">‹</button><div class="text-xl font-bold">' + year + '년 ' + (month+1) + '월</div><button onclick="window.nextMonth()" class="p-2">›</button></div><div class="grid grid-cols-7 gap-2 mb-2">';
+      
+      ['일','월','화','수','목','금','토'].forEach(d => {
+        html += '<div class="text-center font-bold">' + d + '</div>';
+      });
+      
+      html += '</div><div class="grid grid-cols-7 gap-2">';
+      
+      for (let i = 0; i < startingDayOfWeek; i++) html += '<div class="min-h-24 bg-gray-50 rounded"></div>';
+      
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dt = new Date(year, month, d);
+        const ds = formatDate(dt);
+        const isWd = isWeekday(dt);
+        const res = getDateReservations(ds);
+        
+        // 고정 수업 추가
+        const fixedClasses = [];
+        if (isWd) {
+          const slots = getTimeSlots(ds);
+          slots.forEach(slot => {
+            const fixInfo = isFixedSlot('creative', ds, slot.id);
+            if (fixInfo.fixed) {
+              fixedClasses.push({ room: 'creative', slotName: slot.name, subject: fixInfo.label });
+            }
+          });
+        }
+        
+        const hasContent = res.length > 0 || fixedClasses.length > 0;
+        
+        html += '<div class="min-h-24 p-2 rounded border-2 ' + (!isWd ? 'bg-gray-50' : hasContent ? 'bg-green-50 border-green-300' : 'bg-white') + '"><div class="font-bold text-sm">' + d + '</div>';
+        
+        res.forEach(r => {
+          const room = rooms.find(rm => rm.id === r.room)?.name;
+          html += '<div class="bg-indigo-100 text-indigo-800 px-2 py-1 rounded text-xs mt-1"><div class="font-bold">' + room + '</div><div>' + r.slotName + '</div><div class="truncate">' + r.subject + '</div></div>';
+        });
+        
+        fixedClasses.forEach(f => {
+          const room = rooms.find(rm => rm.id === f.room)?.name;
+          html += '<div class="bg-orange-100 text-orange-800 px-2 py-1 rounded text-xs mt-1"><div class="font-bold">' + room + '</div><div>' + f.slotName + '</div><div class="truncate">' + f.subject + '</div></div>';
+        });
+        
+        html += '</div>';
+      }
+      
+      html += '</div>';
+      return html;
+    }
+
+    function renderModal() {
+      return `
+        <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div class="bg-white rounded-2xl p-8 max-w-md w-full">
+            <h3 class="text-2xl font-bold mb-2">${state.selectedSlot.name} 예약</h3>
+            <p class="text-gray-600 mb-4">${state.selectedSlot.time}</p>
+            <input type="text" id="subj" placeholder="교과명" class="w-full px-4 py-3 border-2 rounded-lg mb-4">
+            <input type="text" value="${state.user.displayName}" disabled class="w-full px-4 py-3 border-2 rounded-lg bg-gray-50 mb-4">
+            <div class="flex gap-3">
+              <button onclick="window.closeModal()" class="flex-1 py-3 bg-gray-200 rounded-lg">취소</button>
+              <button onclick="window.submitRes()" class="flex-1 py-3 bg-indigo-600 text-white rounded-lg">예약</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    window.appLogin = login;
+    window.appLogout = logout;
+    window.selectRoom = (id) => { state.room = id; state.page = 'booking'; state.date = ''; state.showCalendar = false; render(); };
+    window.goHome = () => { state.page = 'home'; state.showCalendar = false; render(); };
+    window.goStatus = () => { state.page = 'status'; state.calendarDate = new Date(); render(); };
+    window.toggleCal = () => { state.showCalendar = !state.showCalendar; render(); };
+    window.selectDate = (d) => { state.date = formatDate(new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth(), d)); state.showCalendar = false; render(); };
+    window.prevMonth = () => { state.calendarDate = new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth() - 1, 1); render(); };
+    window.nextMonth = () => { state.calendarDate = new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth() + 1, 1); render(); };
+    window.openModal = (slot) => { state.selectedSlot = slot; state.showModal = true; render(); };
+    window.closeModal = () => { state.showModal = false; render(); };
+    window.submitRes = () => { makeReservation(document.getElementById('subj').value); };
+    window.cancelRes = removeReservation;
+
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        state.user = user;
+        state.page = 'home';
+        const q = query(collection(db, 'reservations'));
+        onSnapshot(q, (snap) => {
+          state.reservations = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          render();
+        });
+      } else {
+        state.user = null;
+        state.page = 'login';
+        render();
+      }
+    });
+  </script>
+</body>
+</html>
